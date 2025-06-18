@@ -548,11 +548,18 @@ export function ChatContainer({ roomId, onOpenSettings, onRoomSelect }: ChatCont
       if (roomMessages.length > 0) {
         console.log(`🔄 FORCING COMPLETE RE-TRANSLATION to ${newLanguage} for ${roomMessages.length} messages`);
         
-        const freshTranslations = new Map();
+        const freshTranslations = new Map<number, string>();
         let processedCount = 0;
-        
-        // Translation disabled - preventing infinite loop
-        console.log(`🛑 Would translate ${roomMessages.length} messages to ${newLanguage}`);
+
+        roomMessages.forEach((msg) => {
+          translationManager.translateMessage(msg, newLanguage, 'normal', (translated) => {
+            freshTranslations.set(msg.id, translated);
+            processedCount += 1;
+            if (processedCount === roomMessages.length) {
+              setTranslatedMessages(freshTranslations);
+            }
+          });
+        });
       }
     }, 200); // Small delay to ensure state is completely reset
     

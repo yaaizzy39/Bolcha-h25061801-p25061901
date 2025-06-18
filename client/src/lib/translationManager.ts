@@ -16,11 +16,18 @@ class TranslationManager {
   private userLanguage = 'ja';
   private cache: Map<string, CacheEntry> = new Map();
   private isProcessing = false;
-  private isDisabled = false; // Enable manual translation only
 
   constructor() {
-    console.log('TranslationManager completely disabled to prevent infinite loop');
-    // All functionality disabled
+    // Load cached translations from localStorage (if any)
+    this.loadCache();
+    try {
+      const storedLang = localStorage.getItem('selectedLanguage');
+      if (storedLang) {
+        this.userLanguage = storedLang;
+      }
+    } catch {
+      /* localStorage might be unavailable (SSR) */
+    }
   }
 
   setUserLanguage(language: string) {
@@ -68,15 +75,56 @@ class TranslationManager {
   }
 
   async translateMessage(
-    message: Message, 
-    targetLanguage: string, 
+    message: Message,
+    targetLanguage: string,
     priority: 'high' | 'normal' | 'low' = 'normal',
     callback: (result: string) => void
   ): Promise<void> {
-    // Translation completely disabled to prevent infinite loop
-    console.log(`Translation blocked: "${message.originalText}" to prevent infinite requests`);
-    callback(message.originalText || '');
-    return;
+    if (!message.originalText) {
+      callback('');
+      return;
+    }
+
+    const sourceLanguage = message.originalLanguage || this.detectLanguage(message.originalText);
+
+    // No need to translate if already in target language
+    if (sourceLanguage === targetLanguage) {
+      callback(message.originalText);
+      return;
+    }
+
+    const cacheKey = this.getCacheKey(message.originalText, sourceLanguage, targetLanguage);
+    if (this.cache.has(cacheKey)) {
+      callback(this.cache.get(cacheKey)!.translatedText);
+      return;
+    }
+
+    try {
+      // Use apiRequest helper so we keep consistent error handling/credentials
+      const res = await apiRequest('POST', '/api/translate', {
+        text: message.originalText,
+        source: sourceLanguage,
+        target: targetLanguage,
+        priority,
+      });
+      const data = await res.json();
+      const translated: string = data?.translatedText || message.originalText;
+
+      // Cache and persist
+      this.cache.set(cacheKey, {
+        text: message.originalText,
+        source: sourceLanguage,
+        target: targetLanguage,
+        translatedText: translated,
+        timestamp: Date.now(),
+      });
+      this.saveCache();
+
+      callback(translated);
+    } catch (err) {
+      console.error('Translation API error:', err);
+      callback(message.originalText);
+    }
   }
 
   private detectLanguage(text: string): string {
