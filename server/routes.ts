@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage.js";
 import { isAuthenticated, setupAuth } from "./googleAuth.js";
 import type { InsertMessage, InsertChatRoom } from "../shared/schema.js";
+import { broadcastToAll, broadcastToRoom, getOnlineUserCount, broadcastOnlineCount } from "./ws_helpers";
 
 interface AuthenticatedUser {
   claims: {
@@ -15,7 +16,7 @@ interface AuthenticatedUser {
   };
 }
 
-interface WebSocketClient extends WebSocket {
+export interface WebSocketClient extends WebSocket {
   userId?: string;
   userName?: string;
   roomId?: number;
@@ -164,7 +165,7 @@ function extractMentions(text: string): string[] {
   return Array.from(new Set(mentions));
 }
 
-export async function registerRoutes(app: Express): Promise<Server> {
+export default async function registerRoutes(app: Express): Promise<Server> {
   // Admin check middleware
   const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -488,38 +489,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/user/likes', isAuthenticated, async (req: Request, res: Response) => {
     try {
-
-  app.put('/api/admin/users/:id', requireAdmin, async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const { isAdmin } = req.body;
-    if (typeof isAdmin !== 'boolean') return res.status(400).json({ error: 'isAdmin must be boolean' });
-    try {
-      const updated = await storage.updateUserSettings(id, { isAdmin });
-      res.json(updated);
-    } catch (e) {
-      res.status(500).json({ error: 'Failed to update user' });
+      const user = req.user as AuthenticatedUser;
+      const likes = await storage.getUserLikes(user.claims.sub);
+      res.json(likes);
+    } catch (error) {
+      console.error('Error fetching user likes:', error);
+      res.status(500).json({ error: 'Failed to fetch user likes' });
     }
   });
 
-  // Admin translation API management routes
-  const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const user = req.user as AuthenticatedUser;
-      console.log('Checking admin access for user:', user.claims.sub);
-      const userData = await storage.getUser(user.claims.sub);
-      console.log('User data:', userData);
-      console.log('isAdmin field:', userData?.isAdmin);
-      if (!userData?.isAdmin) {
-        console.log('User is not admin, access denied');
-        return res.status(403).json({ error: 'Admin access required' });
-      }
-      console.log('Admin access granted');
-      next();
-    } catch (error) {
-      console.error('Error verifying admin status:', error);
-      res.status(500).json({ error: 'Failed to verify admin status' });
-    }
-  };
+  
+
+
+  
 
   // Test admin endpoint
   app.get('/api/admin/test', isAuthenticated, async (req: Request, res: Response) => {
@@ -638,78 +620,51 @@ export async function registerRoutes(app: Express): Promise<Server> {
     path: '/websocket'
   });
 
-  function broadcastToRoom(wss: WebSocketServer, roomId: number, data: any) {
-    const message = JSON.stringify(data);
-    let sentCount = 0;
-    let totalInRoom = 0;
-    
-    wss.clients.forEach((client: WebSocketClient) => {
-      if (client.readyState === WebSocket.OPEN && client.roomId === roomId) {
-        totalInRoom++;
-        client.send(message);
-        sentCount++;
-      }
-    });
-    
-    console.log(`Broadcast message sent to ${sentCount} clients in room ${roomId}`);
-  }
 
-  function getOnlineUserCount(roomId: number): number {
-    let count = 0;
-    wss.clients.forEach((client: WebSocketClient) => {
-      if (client.readyState === WebSocket.OPEN && client.roomId === roomId) {
-        count++;
-      }
-    });
-    return count;
-  }
-
-  function broadcastOnlineCount(roomId: number) {
-    const onlineCount = getOnlineUserCount(roomId);
-    console.log(`Broadcasting online count for room ${roomId}: ${onlineCount} users`);
-    broadcastToRoom(wss, roomId, {
-      type: 'online_count_updated',
-      roomId,
-      onlineCount,
-      timestamp: new Date().toISOString()
-    });
-  }
 
   wss.on('connection', (ws: WebSocketClient, req) => {
     console.log('WebSocket client connected');
-    
-    ws.on('message', async (message: Buffer) => {
+        ws.on('message', async (message: Buffer) => {
+      let data: any;
+      // 1. Parse incoming JSON safely
       try {
-        const data = JSON.parse(message.toString());
-        console.log('Received WebSocket message:', data);
-        
-        if (data.type === 'auth') {
-          ws.userId = data.userId;
-          ws.userName = data.userName;
-          console.log('WebSocket authenticated:', { userId: data.userId, userName: data.userName });
-          
-          broadcastToAll(wss, {
-            type: 'user_joined',
-            userName: data.userName,
-            timestamp: new Date().toISOString()
-          });
-        } else if (data.type === 'join_room') {
-          const previousRoomId = ws.roomId;
-          
-          if (previousRoomId !== undefined) {
-            broadcastOnlineCount(previousRoomId);
+        data = JSON.parse(message.toString());
+      } catch (parseError) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: 'Invalid JSON',
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        return;
+      }
+
+      // 2. Handle message types
+      try {
+        switch (data.type) {
+          case 'auth': {
+            ws.userId = data.userId;
+            ws.userName = data.userName;
+            broadcastToAll(wss, {
+              type: 'user_joined',
+              userName: data.userName,
+              timestamp: new Date().toISOString(),
+            });
+            break;
           }
-          
-          ws.roomId = data.roomId;
-          broadcastOnlineCount(data.roomId);
-          
-          const onlineCount = getOnlineUserCount(data.roomId);
-          console.log(`User ${ws.userId} joined room ${data.roomId}, online count: ${onlineCount}`);
-        } else if (data.type === 'chat_message') {
-          // Handle chat message creation and broadcasting
-          if (ws.roomId && ws.userId) {
-            try {
-              const messageData = {
+          case 'join_room': {
+            const prevRoom = ws.roomId;
+            if (prevRoom !== undefined) {
+              broadcastOnlineCount(wss, prevRoom);
+            }
+            ws.roomId = data.roomId;
+            broadcastOnlineCount(wss, data.roomId);
+            break;
+          }
+          case 'chat_message': {
+            if (ws.roomId && ws.userId) {
+              const messageData: InsertMessage = {
                 roomId: ws.roomId,
                 senderId: ws.userId,
                 senderName: ws.userName || 'Unknown User',
@@ -718,81 +673,105 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 replyToId: data.replyToId || null,
                 replyToText: data.replyToText || null,
                 replyToSenderName: data.replyToSenderName || null,
-                mentions: data.mentions || []
-              } as InsertMessage;
-
-              const newMessage = await storage.createMessage(messageData);
-              
+                mentions: data.mentions || [],
+              };
+              try {
+                const newMsg = await storage.createMessage(messageData);
+                broadcastToRoom(wss, ws.roomId, {
+                  type: 'new_message',
+                  message: newMsg,
+                  timestamp: new Date().toISOString(),
+                });
+              } catch (err) {
+                ws.send(
+                  JSON.stringify({
+                    type: 'error',
+                    message: 'Failed to save message',
+                    timestamp: new Date().toISOString(),
+                  }),
+                );
+              }
+            }
+            break;
+          }
+          case 'new_message': {
+            if (ws.roomId) {
               broadcastToRoom(wss, ws.roomId, {
                 type: 'new_message',
-                message: newMessage,
-                timestamp: new Date().toISOString()
+                message: data.message,
+                timestamp: new Date().toISOString(),
               });
-            } catch (error) {
-              console.error('Error creating message:', error);
-              ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Failed to send message',
-                timestamp: new Date().toISOString()
-              }));
             }
+            break;
           }
-        } else if (data.type === 'new_message') {
-          if (ws.roomId) {
-            broadcastToRoom(wss, ws.roomId, {
-              type: 'new_message',
-              message: data.message,
-              timestamp: new Date().toISOString()
+          case 'message_deleted': {
+            if (ws.roomId) {
+              broadcastToRoom(wss, ws.roomId, {
+                type: 'message_deleted',
+                messageId: data.messageId,
+                timestamp: new Date().toISOString(),
+              });
+            }
+            break;
+          }
+          case 'room_created': {
+            broadcastToAll(wss, {
+              type: 'room_created',
+              room: data.room,
+              timestamp: new Date().toISOString(),
             });
+            break;
           }
-        } else if (data.type === 'message_deleted') {
-          if (ws.roomId) {
-            broadcastToRoom(wss, ws.roomId, {
-              type: 'message_deleted',
-              messageId: data.messageId,
-              timestamp: new Date().toISOString()
+          case 'room_deleted': {
+            broadcastToAll(wss, {
+              type: 'room_deleted',
+              roomId: data.roomId,
+              timestamp: new Date().toISOString(),
             });
+            break;
           }
-        } else if (data.type === 'room_created') {
-          broadcastToAll(wss, {
-            type: 'room_created',
-            room: data.room,
-            timestamp: new Date().toISOString()
-          });
-        } else if (data.type === 'room_deleted') {
-          broadcastToAll(wss, {
-            type: 'room_deleted',
-            roomId: data.roomId,
-            timestamp: new Date().toISOString()
-          });
-        } else if (data.type === 'message_like_updated') {
-          if (ws.roomId) {
-            broadcastToRoom(wss, ws.roomId, {
-              type: 'message_like_updated',
-              messageId: data.messageId,
-              liked: data.liked,
-              totalLikes: data.totalLikes,
-              userId: data.userId,
-              timestamp: new Date().toISOString()
-            });
+          case 'message_like_updated': {
+            if (ws.roomId) {
+              broadcastToRoom(wss, ws.roomId, {
+                type: 'message_like_updated',
+                messageId: data.messageId,
+                liked: data.liked,
+                totalLikes: data.totalLikes,
+                userId: data.userId,
+                timestamp: new Date().toISOString(),
+              });
+            }
+            break;
           }
+          default:
+            // Unknown message type
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                message: 'Unknown message type',
+                timestamp: new Date().toISOString(),
+              }),
+            );
         }
-      } catch (error) {
-        console.error('WebSocket message error:', error);
-        ws.send(JSON.stringify({
-          type: 'error',
-          message: 'Invalid message format',
-          timestamp: new Date().toISOString()
-        }));
+      } catch (handlerError) {
+        console.error('WS handler error:', handlerError);
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: 'Server error',
+            timestamp: new Date().toISOString(),
+          }),
+        );
       }
     });
+
+
 
     ws.on('close', () => {
       console.log('WebSocket client disconnected');
       if (ws.roomId !== undefined) {
-        broadcastOnlineCount(ws.roomId);
+        broadcastOnlineCount(wss, ws.roomId);
       }
-      
       if (ws.userName) {
         broadcastToAll(wss, {
           type: 'user_left',
@@ -806,21 +785,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.error('WebSocket error:', error);
     });
   });
-
-  function broadcastToAll(wss: WebSocketServer, data: any) {
-    const message = JSON.stringify(data);
-    let sentCount = 0;
-    
-    wss.clients.forEach((client: WebSocketClient) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-        sentCount++;
-      }
-    });
-    
-    console.log(`Broadcast message sent to ${sentCount} clients out of ${wss.clients.size} total`);
-  }
-
 
   return server;
 }
