@@ -18,7 +18,8 @@ WORKDIR /app
 
 COPY --from=builder /app .
 
-ENV NODE_ENV=production
+#Googleログインが出来ない為、とりあえずコメントアウトした（25/6/19）
+#ENV NODE_ENV=production
 
 # 5000番ポートでExpressなどが起動する想定
 EXPOSE 5000

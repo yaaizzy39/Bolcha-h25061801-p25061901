@@ -18,6 +18,10 @@ services:
     container_name: bolcha-app
     env_file:
       - .env
+    environment:         # ← 追記
+      NODE_ENV: development
+      DATABASE_URL: "postgresql://postgres:postgrespw@db:5432/bolcha"
+    command: ["node", "dist/index.js"]
     ports:
       - "5000:5000"
     depends_on:

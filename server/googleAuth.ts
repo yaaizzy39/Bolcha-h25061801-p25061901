@@ -26,7 +26,10 @@ function getSession() {
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure:
+        process.env.COOKIE_SECURE
+          ? process.env.COOKIE_SECURE === "true"
+          : process.env.NODE_ENV === "production",
       maxAge: sessionTtlMs,
       sameSite: "lax",
     },
